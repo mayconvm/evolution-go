@@ -1,5 +1,38 @@
 # Evolution GO - Changelog
 
+## v0.7.3-beta
+
+**Docker:** `evolution-go:0.7.3-beta`
+
+### 🔧 Correções
+- **whatsmeow atualizado para 2026-11-02** — a versão fixada na 0.7.2
+  (commit `b572e5bcb92b`, de 30/06/2026) ficou 125 dias atrás do upstream. O
+  WhatsApp subiu a versão mínima de cliente nesse intervalo e passou a recusar a
+  conexão com **405 client outdated**, impedindo pareamento e reconexão das
+  instâncias. Agora em `v0.0.0-20261102152715-54038813c47f`.
+- **Go 1.26** — o whatsmeow novo exige `go >= 1.26.0`; o `Dockerfile` passou a
+  usar `golang:1.26.10-alpine` no estágio de build.
+- **Ajustes de API do whatsmeow** — `UpdateBlocklist` e `GetBlocklist` agora
+  recebem um `dhash`; `SetStatusMessage` passou a receber `types.SetStatusInput`
+  (novo endpoint mex). O formato de resposta de bloqueio mudou de
+  `Modifications` para `Items` (com `LID`/`PN`/`Active`) — a documentação foi
+  atualizada, mas integrações que leem `Modifications` precisam de ajuste.
+- **Migração automática do banco de autenticação** — o schema do whatsmeow sobe
+  de v14 para v16 (`companion_meta_nonce`, `wasa_root_secret_id`). Roda sozinho
+  ao abrir o container; testado com banco SQLite v14 existente.
+
+### 🔧 CI
+- **Release passa a ser disparado por tag.** O workflow
+  `publish_docker_image.yml` (build a cada push em `main`, sem gerar Release)
+  foi removido e substituído por `release.yml`: push de tag `X.Y.Z` ou
+  `X.Y.Z-sufixo` valida o `VERSION`, publica a imagem multi-arch e cria o
+  GitHub Release a partir da seção correspondente deste CHANGELOG. Tags com
+  sufixo (`-beta`) não movem a tag `latest` e o Release sai como pre-release.
+  Especificação em `spec/spec-process-cicd-release.md`.
+- **Makefile** — a versão lida do CHANGELOG agora vem do heading `## vX.Y.Z`,
+  e não mais do primeiro `vN.N.N` encontrado no arquivo (que podia ser uma
+  pseudo-versão de módulo citada no texto).
+
 ## v0.7.2
 
 **Docker:** `evoapicloud/evolution-go:0.7.2`
