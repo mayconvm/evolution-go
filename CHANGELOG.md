@@ -1,6 +1,8 @@
 # Evolution GO - Changelog
 
-## Não lançado
+## v0.7.3-beta
+
+**Docker:** `evolution-go:0.7.3-beta`
 
 ### 🔧 Correções
 - **whatsmeow atualizado para 2026-11-02** — a versão fixada na 0.7.2
@@ -18,6 +20,18 @@
 - **Migração automática do banco de autenticação** — o schema do whatsmeow sobe
   de v14 para v16 (`companion_meta_nonce`, `wasa_root_secret_id`). Roda sozinho
   ao abrir o container; testado com banco SQLite v14 existente.
+
+### 🔧 CI
+- **Release passa a ser disparado por tag.** O workflow
+  `publish_docker_image.yml` (build a cada push em `main`, sem gerar Release)
+  foi removido e substituído por `release.yml`: push de tag `X.Y.Z` ou
+  `X.Y.Z-sufixo` valida o `VERSION`, publica a imagem multi-arch e cria o
+  GitHub Release a partir da seção correspondente deste CHANGELOG. Tags com
+  sufixo (`-beta`) não movem a tag `latest` e o Release sai como pre-release.
+  Especificação em `spec/spec-process-cicd-release.md`.
+- **Makefile** — a versão lida do CHANGELOG agora vem do heading `## vX.Y.Z`,
+  e não mais do primeiro `vN.N.N` encontrado no arquivo (que podia ser uma
+  pseudo-versão de módulo citada no texto).
 
 ## v0.7.2
 
