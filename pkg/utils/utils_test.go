@@ -1,8 +1,11 @@
 package utils
 
 import (
+	"sort"
 	"strings"
 	"testing"
+
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 )
 
 func TestCreateJID(t *testing.T) {
@@ -382,5 +385,117 @@ func TestCanonicalJID(t *testing.T) {
 				t.Errorf("CanonicalJID for input %q still has '+' in User: %q", tt.input, canonical.User)
 			}
 		})
+	}
+}
+
+func TestParsePlatformType(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected waCompanionReg.DeviceProps_PlatformType
+		hasError bool
+	}{
+		{
+			name:     "chrome",
+			input:    "chrome",
+			expected: waCompanionReg.DeviceProps_CHROME,
+		},
+		{
+			name:     "uppercase CHROME is normalized",
+			input:    "CHROME",
+			expected: waCompanionReg.DeviceProps_CHROME,
+		},
+		{
+			name:     "surrounding whitespace and mixed case",
+			input:    " Desktop ",
+			expected: waCompanionReg.DeviceProps_DESKTOP,
+		},
+		{
+			name:     "legacy typo andorid-tablet is still accepted",
+			input:    "andorid-tablet",
+			expected: waCompanionReg.DeviceProps_ANDROID_TABLET,
+		},
+		{
+			name:     "android-tablet alias",
+			input:    "android-tablet",
+			expected: waCompanionReg.DeviceProps_ANDROID_TABLET,
+		},
+		{
+			name:     "unknown is rejected",
+			input:    "unknown",
+			expected: waCompanionReg.DeviceProps_UNKNOWN,
+			hasError: true,
+		},
+		{
+			name:     "empty string is rejected",
+			input:    "",
+			expected: waCompanionReg.DeviceProps_UNKNOWN,
+			hasError: true,
+		},
+		{
+			name:     "arbitrary value is rejected",
+			input:    "navegador",
+			expected: waCompanionReg.DeviceProps_UNKNOWN,
+			hasError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParsePlatformType(tt.input)
+
+			if tt.hasError {
+				if err == nil {
+					t.Fatalf("ParsePlatformType(%q) expected error, got nil", tt.input)
+				}
+				if !strings.Contains(err.Error(), strings.Join(PlatformTypeNames(), ", ")) {
+					t.Errorf("ParsePlatformType(%q) error does not list accepted values: %v", tt.input, err)
+				}
+			} else if err != nil {
+				t.Fatalf("ParsePlatformType(%q) unexpected error: %v", tt.input, err)
+			}
+
+			if got != tt.expected {
+				t.Errorf("ParsePlatformType(%q) = %v, want %v", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestPlatformTypeNames(t *testing.T) {
+	names := PlatformTypeNames()
+
+	if len(names) == 0 {
+		t.Fatal("PlatformTypeNames() returned an empty list")
+	}
+
+	for _, name := range names {
+		if name == "unknown" {
+			t.Error("PlatformTypeNames() must not include \"unknown\"")
+		}
+	}
+
+	if !sort.StringsAreSorted(names) {
+		t.Errorf("PlatformTypeNames() is not sorted: %v", names)
+	}
+
+	// Todo nome listado precisa ser aceito e todo alias precisa estar listado.
+	for _, name := range names {
+		if _, err := ParsePlatformType(name); err != nil {
+			t.Errorf("ParsePlatformType(%q) rejected a name advertised by PlatformTypeNames(): %v", name, err)
+		}
+	}
+
+	for name := range platformTypeAliases {
+		found := false
+		for _, listed := range names {
+			if listed == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("PlatformTypeNames() is missing alias %q", name)
+		}
 	}
 }

@@ -84,6 +84,48 @@ Sistema operacional do ambiente.
 OS_NAME=Linux
 ```
 
+### CONNECTION_NAME
+
+Nome exibido no vínculo em **WhatsApp → Aparelhos conectados**. Quando vazio, vale o
+`OS_NAME` (ou o SO detectado no boot) — que é o comportamento histórico.
+
+- **Tipo**: String
+- **Padrão**: vazio (usa `OS_NAME`)
+- **Efeito**: passa a ser o `DeviceProps.Os` enviado ao WhatsApp no pareamento
+
+```env
+CONNECTION_NAME=CRM Imobi
+```
+
+### PLATFORM_TYPE
+
+Tipo de dispositivo anunciado ao WhatsApp no pareamento (`DeviceProps.PlatformType`).
+Define **como** o nome aparece na lista de aparelhos conectados.
+
+- **Tipo**: String (case-insensitive)
+- **Padrão**: `chrome`
+- **Valores**: `aloha`, `andorid-tablet`, `android`, `android-phone`, `android-tablet`,
+  `chrome`, `desktop`, `edge`, `firefox`, `ie`, `ios-catalyst`, `ios-phone`, `ipad`, `mac`,
+  `opera`, `safari`, `tv-tcl`, `uwp`, `wearos`
+- **Valor inválido**: a aplicação **não sobe** e imprime a lista de valores aceitos.
+
+```env
+PLATFORM_TYPE=desktop
+```
+
+Resultado em Aparelhos conectados:
+
+| `PLATFORM_TYPE` | `CONNECTION_NAME` | Aparelhos conectados |
+|---|---|---|
+| `chrome` (padrão) | vazio | Google Chrome (Linux) |
+| `chrome` | `CRM Imobi` | Google Chrome (CRM Imobi) |
+| `desktop` | `CRM Imobi` | **CRM Imobi** |
+
+> **Nota:** o nome só é enviado em **novos pareamentos**. Instâncias já pareadas continuam
+> mostrando o rótulo antigo até serem desconectadas e pareadas de novo.
+> `unknown` é recusado de propósito: nesse valor o WhatsApp descarta o nome e mostra
+> "Other device".
+
 ---
 
 ## Banco de Dados PostgreSQL

@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	config_env "github.com/evolution-foundation/evolution-go/pkg/config/env"
+	"github.com/evolution-foundation/evolution-go/pkg/utils"
 )
 
 type Config struct {
@@ -31,6 +32,8 @@ type Config struct {
 	WebhookFiles         bool
 	ConnectOnStartup     bool
 	OsName               string
+	ConnectionName       string
+	PlatformType         string
 	AmqpUrl              string
 	AmqpGlobalEnabled    bool
 	WebhookUrl           string
@@ -247,6 +250,16 @@ func Load() *Config {
 
 	osName := os.Getenv(config_env.OS_NAME)
 
+	connectionName := strings.TrimSpace(os.Getenv(config_env.CONNECTION_NAME))
+
+	platformType := strings.ToLower(strings.TrimSpace(os.Getenv(config_env.PLATFORM_TYPE)))
+	if platformType == "" {
+		platformType = "chrome" // default histórico: mantém o comportamento atual
+	}
+	if _, err := utils.ParsePlatformType(platformType); err != nil {
+		logger.LogFatal("[CONFIG] invalid PLATFORM_TYPE %q: %v", platformType, err)
+	}
+
 	amqpUrl := os.Getenv(config_env.AMQP_URL)
 
 	// Validate AMQP URL format
@@ -352,6 +365,8 @@ func Load() *Config {
 		WebhookFiles:         webhookFiles == "true",
 		ConnectOnStartup:     connectOnStartup == "true",
 		OsName:               osName,
+		ConnectionName:       connectionName,
+		PlatformType:         platformType,
 		AmqpUrl:              amqpUrl,
 		AmqpGlobalEnabled:    amqpGlobalEnabled == "true",
 		WebhookUrl:           webhookUrl,

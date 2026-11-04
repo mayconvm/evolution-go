@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -405,47 +406,64 @@ func WhatsAppGetUserOS() string {
 	}
 }
 
+// platformTypeAliases é a fonte única do mapeamento entre o valor textual de
+// PLATFORM_TYPE e o enum do whatsmeow. "andorid-tablet" é o typo histórico,
+// mantido como alias legado para não quebrar configuração existente.
+var platformTypeAliases = map[string]waCompanionReg.DeviceProps_PlatformType{
+	"desktop":        waCompanionReg.DeviceProps_DESKTOP,
+	"mac":            waCompanionReg.DeviceProps_CATALINA,
+	"android":        waCompanionReg.DeviceProps_ANDROID_AMBIGUOUS,
+	"android-phone":  waCompanionReg.DeviceProps_ANDROID_PHONE,
+	"andorid-tablet": waCompanionReg.DeviceProps_ANDROID_TABLET,
+	"android-tablet": waCompanionReg.DeviceProps_ANDROID_TABLET,
+	"ios-phone":      waCompanionReg.DeviceProps_IOS_PHONE,
+	"ios-catalyst":   waCompanionReg.DeviceProps_IOS_CATALYST,
+	"ipad":           waCompanionReg.DeviceProps_IPAD,
+	"wearos":         waCompanionReg.DeviceProps_WEAR_OS,
+	"ie":             waCompanionReg.DeviceProps_IE,
+	"edge":           waCompanionReg.DeviceProps_EDGE,
+	"chrome":         waCompanionReg.DeviceProps_CHROME,
+	"safari":         waCompanionReg.DeviceProps_SAFARI,
+	"firefox":        waCompanionReg.DeviceProps_FIREFOX,
+	"opera":          waCompanionReg.DeviceProps_OPERA,
+	"uwp":            waCompanionReg.DeviceProps_UWP,
+	"aloha":          waCompanionReg.DeviceProps_ALOHA,
+	"tv-tcl":         waCompanionReg.DeviceProps_TCL_TV,
+}
+
+// PlatformTypeNames lista os valores aceitos por ParsePlatformType, em ordem
+// alfabética, para uso em mensagens de erro e documentação.
+func PlatformTypeNames() []string {
+	names := make([]string, 0, len(platformTypeAliases))
+	for name := range platformTypeAliases {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ParsePlatformType converte o valor de PLATFORM_TYPE no enum do whatsmeow.
+// Aceita os aliases de WhatsAppGetUserAgent, case-insensitive. UNKNOWN é
+// recusado: o WhatsApp descarta o nome exibido nesse caso.
+func ParsePlatformType(name string) (waCompanionReg.DeviceProps_PlatformType, error) {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" {
+		return waCompanionReg.DeviceProps_UNKNOWN, fmt.Errorf("platform type is empty, accepted values: %s", strings.Join(PlatformTypeNames(), ", "))
+	}
+
+	if platformType, ok := platformTypeAliases[normalized]; ok {
+		return platformType, nil
+	}
+
+	return waCompanionReg.DeviceProps_UNKNOWN, fmt.Errorf("invalid platform type %q, accepted values: %s", name, strings.Join(PlatformTypeNames(), ", "))
+}
+
 func WhatsAppGetUserAgent(agentType string) waCompanionReg.DeviceProps_PlatformType {
-	switch strings.ToLower(agentType) {
-	case "desktop":
-		return waCompanionReg.DeviceProps_DESKTOP
-	case "mac":
-		return waCompanionReg.DeviceProps_CATALINA
-	case "android":
-		return waCompanionReg.DeviceProps_ANDROID_AMBIGUOUS
-	case "android-phone":
-		return waCompanionReg.DeviceProps_ANDROID_PHONE
-	case "andorid-tablet":
-		return waCompanionReg.DeviceProps_ANDROID_TABLET
-	case "ios-phone":
-		return waCompanionReg.DeviceProps_IOS_PHONE
-	case "ios-catalyst":
-		return waCompanionReg.DeviceProps_IOS_CATALYST
-	case "ipad":
-		return waCompanionReg.DeviceProps_IPAD
-	case "wearos":
-		return waCompanionReg.DeviceProps_WEAR_OS
-	case "ie":
-		return waCompanionReg.DeviceProps_IE
-	case "edge":
-		return waCompanionReg.DeviceProps_EDGE
-	case "chrome":
-		return waCompanionReg.DeviceProps_CHROME
-	case "safari":
-		return waCompanionReg.DeviceProps_SAFARI
-	case "firefox":
-		return waCompanionReg.DeviceProps_FIREFOX
-	case "opera":
-		return waCompanionReg.DeviceProps_OPERA
-	case "uwp":
-		return waCompanionReg.DeviceProps_UWP
-	case "aloha":
-		return waCompanionReg.DeviceProps_ALOHA
-	case "tv-tcl":
-		return waCompanionReg.DeviceProps_TCL_TV
-	default:
+	platformType, err := ParsePlatformType(agentType)
+	if err != nil {
 		return waCompanionReg.DeviceProps_UNKNOWN
 	}
+	return platformType
 }
 
 func GetMessageType(waMsg *waE2E.Message) string {
