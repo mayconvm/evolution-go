@@ -2,6 +2,35 @@
 
 ## Não lançado
 
+## v0.7.5-beta
+
+**Docker:** `evolution-go:0.7.5-beta`
+
+### 🔧 Correções
+- **`POST /chat/history-sync` não produzia nenhum histórico** — o pedido de
+  histórico sob demanda (`ProtocolMessage.HISTORY_SYNC_ON_DEMAND`) era enviado com
+  `client.SendMessage(ctx, messageInfo.Chat, msg, {Peer: true})`, ou seja,
+  endereçado ao **contato**. Peer message precisa ir para o **próprio
+  dispositivo** (`cli.getOwnID()`): o aparelho principal nunca recebia o pedido e
+  nenhum evento `HistorySync` era emitido — enquanto isso a rota respondia `200`,
+  porque é apenas o ACK do envio do nó. Agora usa `client.SendPeerMessage`, como
+  o próprio comentário de `BuildHistorySyncRequest` no whatsmeow indica. Efeito
+  visível: o client que consumia o endpoint ficava esperando um bloco que nunca
+  chegava, sem erro nenhum.
+- **Validação da âncora do histórico** — `messageInfo` nulo, `Chat` vazio, `ID`
+  vazio ou `Timestamp` zero agora retornam erro explicitamente, em vez de montar
+  um pedido que o aparelho não consegue casar e responder `200` sem bloco.
+- **`count` do histórico** — ausente ou `<= 0` passa a usar **50** (recomendação
+  da lib) e valores acima de **100** são aparados, em vez de repassar `0` (nenhuma
+  mensagem) ou valores que o aparelho pode recusar.
+- Log de envio do pedido passou a registrar `count`, `is_from_me`, `is_group` e o
+  `request_id` do ACK — sem JID, sem telefone e sem conteúdo.
+
+### 🧪 Testes
+- `pkg/chat/service/chat_service_history_test.go`: validação/clamp da âncora e o
+  payload montado (`ChatJID`, `OldestMsgID`, `OldestMsgFromMe`,
+  `OnDemandMsgCount` e `OldestMsgTimestampMS` em **segundos**).
+
 ## v0.7.4-beta
 
 **Docker:** `evolution-go:0.7.4-beta`

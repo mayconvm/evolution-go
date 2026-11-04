@@ -313,6 +313,24 @@ Solicita sincronização de histórico de mensagens antigas (WhatsApp Multi-Devi
 
 **Nota**: Este endpoint é usado para sincronizar mensagens antigas do histórico do WhatsApp Multi-Device. Requer uma mensagem de referência válida.
 
+> ⚠️ **O pedido é endereçado ao seu próprio dispositivo, não ao contato.** A
+> resposta 200 é apenas o **ACK** do envio: o bloco chega depois, de forma
+> assíncrona, pelo webhook no evento **`HistorySync`** com
+> `data.Data.syncType = 6` (`ON_DEMAND`) — o path das mensagens é
+> `data.Data.conversations[].messages[].message`. Não existe "baixar todo o
+> histórico": cada chamada traz até `count` mensagens **imediatamente anteriores**
+> à mensagem de referência, e é preciso encadear chamadas apontando a nova âncora
+> para a mensagem mais antiga já recebida. Só o **aparelho principal** responde;
+> a mídia histórica costuma vir inutilizável (URL cifrada).
+
+**Valores aceitos**:
+
+- `count` ausente/`<= 0` usa **50** (recomendação da lib); acima de **100** é aparado.
+- `messageInfo.Chat`, `messageInfo.ID` e `messageInfo.Timestamp` são **obrigatórios**:
+  âncora vazia produz um pedido que o aparelho não consegue casar e resultaria em
+  `200` sem nenhum `HistorySync`. `Timestamp` usa **RFC3339 com offset**
+  (`2026-10-29T15:26:04-03:00`), não epoch.
+
 **Resposta de Sucesso (200)**:
 ```json
 {
