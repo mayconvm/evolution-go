@@ -323,6 +323,15 @@ Solicita sincronização de histórico de mensagens antigas (WhatsApp Multi-Devi
 > para a mensagem mais antiga já recebida. Só o **aparelho principal** responde;
 > a mídia histórica costuma vir inutilizável (URL cifrada).
 
+> 🔴 **Limitação conhecida (0.7.5-beta): o `ON_DEMAND` não é entregue.** O
+> `DeviceProps` do whatsmeow anuncia `onDemandReady: nil` e
+> `completeOnDemandReady: nil`, então o servidor considera o companion incapaz de
+> histórico sob demanda e **descarta o pedido sem erro e sem log**. Na prática o
+> endpoint responde `200` (ACK) e **nenhum `HistorySync` de `syncType = 6`
+> chega** — só os de bootstrap (tipos 0–5). A correção exige ligar as duas flags
+> na lib/fork **e reparear** o número (o `DeviceProps` só viaja no registro de um
+> novo pareamento). Ver `CHANGELOG.md` → "Pendência conhecida".
+
 **Valores aceitos**:
 
 - `count` ausente/`<= 0` usa **50** (recomendação da lib); acima de **100** é aparado.

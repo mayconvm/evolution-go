@@ -2,6 +2,32 @@
 
 ## Não lançado
 
+### ⚠️ Pendência conhecida (não resolvida na 0.7.5-beta)
+
+- **`history-sync` ainda não recebe bloco: `onDemandReady` não é anunciado.** A
+  `0.7.5-beta` corrigiu o **endereçamento** do pedido (peer message vai ao próprio
+  dispositivo), e o ACK passou a devolver `Chat` = o próprio JID. Mesmo assim o
+  WhatsApp **não emite** o `HistorySync` de `syncType = 6` (`ON_DEMAND`): o
+  `DeviceProps` desta lib declara
+
+  ```go
+  OnDemandReady:         nil,
+  CompleteOnDemandReady: nil,
+  ```
+
+  em `store/clientpayload.go` (`DeviceProps_HistorySyncConfig`, campos 16 e 18):
+  o companion anuncia ao servidor que **não suporta** histórico sob demanda, e o
+  pedido é descartado **sem erro no socket e sem log**. O `HistorySync` de
+  bootstrap (tipos 0–5) funciona normalmente — só o `ON_DEMAND` não chega.
+
+  **Correção a fazer:** ligar as duas flags (`new(true)`) na lib ou por override
+  no fork antes do `StartClient`. Como o `DeviceProps` vai no payload de
+  **registro**, a mudança **só vale em um novo pareamento** (não é reenviado em
+  reconexão) — exige reparear o número, com queda de atendimento, e há risco de o
+  WhatsApp recusar o handshake. Por isso **não foi aplicada** ainda; decisão de
+  retomar depois (registrado no produto em
+  `crm-whats/docs/plans/inprogress/2026-11-04-historico-whatsapp/progress.md`).
+
 ## v0.7.5-beta
 
 **Docker:** `evolution-go:0.7.5-beta`
