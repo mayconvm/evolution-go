@@ -1,5 +1,27 @@
 # Evolution GO - Changelog
 
+## Não lançado
+
+## v0.7.4-beta
+
+**Docker:** `evolution-go:0.7.4-beta`
+
+### 🆕 New Features
+- **`CONNECTION_NAME` e `PLATFORM_TYPE`** — duas variáveis opcionais que controlam o rótulo
+  exibido em **WhatsApp → Aparelhos conectados**. `CONNECTION_NAME` define o nome mostrado
+  (antes, o `DeviceProps.Os` vinha sempre do `OS_NAME`) e `PLATFORM_TYPE` define o tipo de
+  dispositivo anunciado no pareamento, que estava fixo em `chrome` no código. Com
+  `PLATFORM_TYPE=desktop` + `CONNECTION_NAME=CRM Imobi` a lista mostra apenas **CRM Imobi**;
+  com o padrão (`chrome` + `OS_NAME`) nada muda. Valor inválido em `PLATFORM_TYPE` impede o
+  boot com a lista de valores aceitos (`unknown` é recusado de propósito: nesse valor o
+  WhatsApp descarta o nome e mostra "Other device"). Ambas resolvidas em memória no
+  `StartClient` — sem mudança de schema, e a env vence inclusive em instâncias já criadas.
+  **TPP:** a confirmação visual com aparelho real de que `desktop` exibe só o nome não foi
+  executada; o default `chrome` mantém o comportamento anterior. Documentado em
+  `docs/wiki/fundamentos/configuration.md` e `docs/wiki/referencia/environment-variables.md`.
+  Nota operacional: o rótulo só é enviado em **novos pareamentos** — instâncias já pareadas
+  mantêm o valor antigo até desconectar e parear de novo.
+
 ## v0.7.3-beta
 
 **Docker:** `evolution-go:0.7.3-beta`

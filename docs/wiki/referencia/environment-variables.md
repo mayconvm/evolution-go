@@ -22,6 +22,8 @@ Para documentação detalhada, consulte: [Configuração](../fundamentos/configu
 | `SERVER_PORT` | `4000` | Porta HTTP |
 | `CLIENT_NAME` | `evolution` | Nome identificador |
 | `OS_NAME` | `Linux` | Sistema operacional |
+| `CONNECTION_NAME` | vazio (usa `OS_NAME`) | Nome exibido em WhatsApp → Aparelhos conectados |
+| `PLATFORM_TYPE` | `chrome` | Tipo de dispositivo anunciado no pareamento; valor inválido impede o boot |
 
 ---
 

@@ -26,7 +26,6 @@ import (
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
-	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -364,15 +363,22 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 
 	var version clientVersion
 
-	platformID, ok := waCompanionReg.DeviceProps_PlatformType_value[strings.ToUpper("chrome")]
-	if ok {
-		store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_PlatformType(platformID).Enum()
-	}
-	if cd.Instance.OsName == "" {
-		cd.Instance.OsName = utils.WhatsAppGetUserOS()
+	// PlatformType e nome exibido vêm do deployment (CONNECTION_NAME/PLATFORM_TYPE),
+	// não da instância: o rótulo em "Aparelhos conectados" é único por engine.
+	if platformType, err := utils.ParsePlatformType(w.config.PlatformType); err == nil {
+		store.DeviceProps.PlatformType = platformType.Enum()
+	} else {
+		w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] invalid PLATFORM_TYPE, keeping default: %v", cd.Instance.Id, err)
 	}
 
-	store.DeviceProps.Os = &cd.Instance.OsName
+	displayName := w.config.ConnectionName
+	if displayName == "" {
+		if cd.Instance.OsName == "" {
+			cd.Instance.OsName = utils.WhatsAppGetUserOS()
+		}
+		displayName = cd.Instance.OsName
+	}
+	store.DeviceProps.Os = &displayName
 	store.DeviceProps.RequireFullSync = proto.Bool(true)
 
 	if w.config.WhatsappVersionMajor != 0 && w.config.WhatsappVersionMinor != 0 && w.config.WhatsappVersionPatch != 0 {
