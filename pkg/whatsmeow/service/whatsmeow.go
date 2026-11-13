@@ -300,6 +300,18 @@ func (w whatsmeowService) ForceUpdateJid(instanceId string, number string) error
 	return nil
 }
 
+// closeContainer fecha o pool do container whatsmeow, se houver. É nil-safe e
+// idempotente: `(*sql.DB).Close` devolve nil quando já está fechado, então o
+// fechamento explícito antes do restart e o `defer` podem coexistir.
+func closeContainer(instanceID string, container *sqlstore.Container, logger *logger_wrapper.LoggerManager) {
+	if container == nil {
+		return
+	}
+	if err := container.Close(); err != nil {
+		logger.GetLogger(instanceID).LogError("[%s] Failed to close whatsmeow container: %v", instanceID, err)
+	}
+}
+
 func (w whatsmeowService) StartClient(cd *ClientData) {
 
 	w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Starting websocket connection to Whatsapp for user '%s'", cd.Instance.Id)
@@ -336,6 +348,12 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to create container: %v", cd.Instance.Id, err)
 		return
 	}
+
+	// O container é dono de um *sql.DB próprio (sqlstore.New abre o pool). Sem
+	// fechar, cada StartClient deixa um pool órfão com conexões ociosas que nunca
+	// expiram (MaxIdleConns=2, ConnMaxIdleTime=0) — foi assim que o Postgres da
+	// engine estourou max_connections em produção.
+	defer closeContainer(cd.Instance.Id, container, w.loggerWrapper)
 
 	if cd.Instance.Jid != "" {
 		jid, _ := utils.ParseJID(cd.Instance.Jid)
@@ -629,6 +647,12 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 			if mycli.config.AmqpGlobalEnabled || mycli.config.NatsGlobalEnabled {
 				go mycli.service.SendToGlobalQueues(postMap["event"].(string), values, mycli.userID)
 			}
+
+			// Fecha o pool ANTES de recursar: `w.StartClient(cd)` bloqueia até o
+			// próximo kill, então os `defer` deste frame nunca rodariam em regime
+			// e o pool ficaria órfão (o vazamento original). Fechar aqui é seguro:
+			// o client já passou por Disconnect() e os mapas/caches foram limpos.
+			closeContainer(cd.Instance.Id, container, w.loggerWrapper)
 
 			// restart client
 			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Restarting client", cd.Instance.Id)

@@ -28,6 +28,24 @@
   retomar depois (registrado no produto em
   `crm-whats/docs/plans/inprogress/2026-11-04-historico-whatsapp/progress.md`).
 
+## v0.7.6-beta
+
+**Docker:** `evolution-go:0.7.6-beta`
+
+### 🔧 Correções
+- **Vazamento de conexões do Postgres (`max_connections` estourado)** — cada
+  chamada de `StartClient` abria um pool `*sql.DB` próprio via `sqlstore.New`
+  e nunca o fechava. Como o container era uma variável local, ele saía de
+  escopo sem `Close()`, e os reinícios automáticos (timeout de QR e
+  `LoggedOut`) acumulavam **um pool órfão por ciclo** — cada um mantendo cerca
+  de duas conexões ociosas que nunca expiravam (`MaxIdleConns=2`,
+  `ConnMaxIdleTime=0`). Em produção isso esgotou `max_connections=100` do
+  Postgres da engine: com um número não pareado em loop de QR, a engine parou
+  de conectar depois de ~1h30–2h. O container agora é fechado explicitamente
+  antes do restart recursivo e em todo retorno antecipado de `StartClient`
+  (`defer`), com helper nil-safe e idempotente que tolera `defer` + fechamento
+  explícito coexistindo.
+
 ## v0.7.5-beta
 
 **Docker:** `evolution-go:0.7.5-beta`
