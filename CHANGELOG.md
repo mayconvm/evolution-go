@@ -28,6 +28,46 @@
   retomar depois (registrado no produto em
   `crm-whats/docs/plans/inprogress/2026-11-04-historico-whatsapp/progress.md`).
 
+## v0.7.6-beta
+
+**Docker:** `evolution-go:0.7.6-beta`
+
+### 🔧 Correções
+- **Vazamento de conexões do Postgres (`max_connections` estourado)** — cada
+  `StartClient` abria um pool `*sql.DB` novo via `sqlstore.New` e nunca o
+  fechava: o caminho `sqlstore.New` → `dbutil.NewWithDB` não aplica
+  `Configure()`, então valiam os defaults do `database/sql`
+  (`MaxOpenConns=0` ilimitado, `MaxIdleConns=2`, `ConnMaxIdleTime=0` — conexões
+  ociosas que nunca expiram). Como os reinícios automáticos (timeout de QR e
+  `LoggedOut`) chamavam `StartClient` recursivamente, cada ciclo deixava um pool
+  órfão com ~2 conexões eternas. O sintoma em produção era a engine parar de
+  conectar ao Postgres depois de ~1h30–2h, com o número de conexões
+  não pareado com o de instâncias. Agora existe **um** container de device por
+  processo, reaproveitado por todas as instâncias e por todos os restarts, com o
+  pool governado por env (ver abaixo) e fechado no shutdown gracioso. A recursão
+  do restart virou **laço rotulado** (`restart:`), então não empilha mais frames
+  nem reabre o banco a cada ciclo.
+  (`pkg/whatsmeow/service/authdb.go`, `pkg/whatsmeow/service/whatsmeow.go`,
+  `cmd/evolution-go/main.go`)
+
+### ⚙️ Mudanças
+- Novas variáveis de ambiente para o pool do container de device:
+  `POSTGRES_AUTH_MAX_OPEN_CONNS` (default `10`),
+  `POSTGRES_AUTH_MAX_IDLE_CONNS` (default `5`),
+  `POSTGRES_AUTH_CONN_MAX_IDLE_TIME` (default `1m`) e
+  `POSTGRES_AUTH_CONN_MAX_LIFETIME` (default `30m`). Valor inválido (não-inteiro,
+  `<= 0` ou duração que não parseia) registra `WARN` e aplica o default — a
+  engine continua subindo.
+
+### 🧪 Testes
+- `pkg/whatsmeow/service/authdb_test.go`: criação única do container sob
+  concorrência (50 goroutines, mesmo ponteiro, callback 1 vez), memorização do
+  erro de criação, aplicação dos 4 valores do pool, `close` nil-safe/idempotente
+  e abertura+upgrade do container sqlite pelo `exPath`.
+- `pkg/config/config_pool_test.go`: defaults e validação das quatro envs de pool
+  (ausente, válido, inválido e `<= 0`), sempre com warn + default em vez de
+  `LogFatal`.
+
 ## v0.7.5-beta
 
 **Docker:** `evolution-go:0.7.5-beta`
