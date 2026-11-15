@@ -28,7 +28,6 @@ import (
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
-	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -67,6 +66,9 @@ type WhatsmeowService interface {
 	PasskeyCeremonyStore() *ceremony.Store
 	SubmitPasskeyResponse(instanceId string, resp *types.WebAuthnResponse) error
 	ConfirmPasskey(instanceId string) error
+
+	// Close libera o container de device compartilhado (pool do Postgres da engine).
+	Close() error
 }
 
 type clientVersion struct {
@@ -96,6 +98,7 @@ type whatsmeowService struct {
 	natsProducer       producer_interfaces.Producer
 	loggerWrapper      *logger_wrapper.LoggerManager
 	passkeyCeremony    *ceremony.Store
+	authContainer      *authContainer
 }
 
 type MyClient struct {
@@ -304,338 +307,329 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 
 	w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Starting websocket connection to Whatsapp for user '%s'", cd.Instance.Id)
 
-	var deviceStore *store.Device
-	var err error
-
 	if w.clientPointer[cd.Instance.Id] != nil {
 		if w.clientPointer[cd.Instance.Id].IsConnected() {
 			return
 		}
 	}
 
-	var container *sqlstore.Container
-
-	if w.config.WaDebug != "" {
-		dbLog := waLog.Stdout("Database", w.config.WaDebug, true)
-		if w.config.PostgresAuthDB != "" {
-			container, err = sqlstore.New(context.Background(), "postgres", w.config.PostgresAuthDB, dbLog)
-		} else {
-			dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-			container, err = sqlstore.New(context.Background(), "sqlite", dsn, dbLog)
-		}
-	} else {
-		if w.config.PostgresAuthDB != "" {
-			container, err = sqlstore.New(context.Background(), "postgres", w.config.PostgresAuthDB, nil)
-		} else {
-			dsn := fmt.Sprintf("file:%s/dbdata/main.db?_pragma=foreign_keys(1)&_busy_timeout=5000&cache=shared&mode=rwc&_journal_mode=WAL", w.exPath)
-			container, err = sqlstore.New(context.Background(), "sqlite", dsn, nil)
-		}
-	}
-
+	// O container de device é único do processo (authContainer) e é reaproveitado
+	// por todas as instâncias e por todos os restarts. Por isso NÃO é fechado nos
+	// retornos desta função: vive até o shutdown, onde Close() o libera.
+	container, err := w.authContainer.get(w.openDeviceContainer)
 	if err != nil {
 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to create container: %v", cd.Instance.Id, err)
 		return
 	}
 
-	if cd.Instance.Jid != "" {
-		jid, _ := utils.ParseJID(cd.Instance.Jid)
-		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Jid found. Getting device store for jid: %s", cd.Instance.Id, jid)
-		deviceStore, err = container.GetDevice(context.Background(), jid)
-		if err != nil {
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Erro ao obter device store: %v", cd.Instance.Id, err)
-			return
-		}
-	} else {
-		w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] No jid found. Creating new device", cd.Instance.Id)
-		deviceStore = container.NewDevice()
-	}
-
-	if deviceStore == nil {
-		w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] No store found. Creating new one", cd.Instance.Id)
-		deviceStore = container.NewDevice()
-
-		cd.Instance.Connected = false
-		err := w.instanceRepository.UpdateConnected(cd.Instance.Id, cd.Instance.Connected, cd.Instance.DisconnectReason)
-		if err != nil {
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Error updating instance: %s", cd.Instance.Id, err)
-		}
-	}
-
-	var version clientVersion
-
-	// PlatformType e nome exibido vêm do deployment (CONNECTION_NAME/PLATFORM_TYPE),
-	// não da instância: o rótulo em "Aparelhos conectados" é único por engine.
-	if platformType, err := utils.ParsePlatformType(w.config.PlatformType); err == nil {
-		store.DeviceProps.PlatformType = platformType.Enum()
-	} else {
-		w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] invalid PLATFORM_TYPE, keeping default: %v", cd.Instance.Id, err)
-	}
-
-	displayName := w.config.ConnectionName
-	if displayName == "" {
-		if cd.Instance.OsName == "" {
-			cd.Instance.OsName = utils.WhatsAppGetUserOS()
-		}
-		displayName = cd.Instance.OsName
-	}
-	store.DeviceProps.Os = &displayName
-	store.DeviceProps.RequireFullSync = proto.Bool(true)
-
-	if w.config.WhatsappVersionMajor != 0 && w.config.WhatsappVersionMinor != 0 && w.config.WhatsappVersionPatch != 0 {
-		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Setting whatsapp version to %d.%d.%d", cd.Instance.Id, w.config.WhatsappVersionMajor, w.config.WhatsappVersionMinor, w.config.WhatsappVersionPatch)
-		version.Major = w.config.WhatsappVersionMajor
-		if err == nil {
-			store.DeviceProps.Version.Primary = proto.Uint32(uint32(version.Major))
-		}
-		version.Minor = w.config.WhatsappVersionMinor
-		if err == nil {
-			store.DeviceProps.Version.Secondary = proto.Uint32(uint32(version.Minor))
-		}
-		version.Patch = w.config.WhatsappVersionPatch
-		if err == nil {
-			store.DeviceProps.Version.Tertiary = proto.Uint32(uint32(version.Patch))
-		}
-	} else {
-		// Try to fetch version from WhatsApp Web
-		webVersion, err := fetchWhatsAppWebVersion()
-		if err != nil {
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to fetch WhatsApp Web version: %v", cd.Instance.Id, err)
-		} else {
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Setting whatsapp version from web to %d.%d.%d", cd.Instance.Id, webVersion.Major, webVersion.Minor, webVersion.Patch)
-			version = *webVersion
-			store.DeviceProps.Version.Primary = proto.Uint32(uint32(version.Major))
-			store.DeviceProps.Version.Secondary = proto.Uint32(uint32(version.Minor))
-			store.DeviceProps.Version.Tertiary = proto.Uint32(uint32(version.Patch))
-		}
-	}
-
-	// 🔒 FIX: Sempre criar logger, mesmo que WaDebug esteja vazio
-	// Usar "INFO" como nível mínimo para garantir que logs importantes apareçam
-	minLevel := w.config.WaDebug
-	if minLevel == "" {
-		minLevel = "INFO" // Nível mínimo para garantir que logs INFO apareçam
-	}
-	clientLog := waLog.Stdout("Client", minLevel, true)
-	client := whatsmeow.NewClient(deviceStore, clientLog)
-
-	w.clientPointer[cd.Instance.Id] = client
-
-	if cd.IsProxy {
-		var proxyConfig ProxyConfig
-		err := json.Unmarshal([]byte(cd.Instance.Proxy), &proxyConfig)
-		if err != nil {
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] error unmarshalling proxy config", cd.Instance.Id)
-			return
-		}
-
-		proxyProtocol := proxyConfig.Protocol
-		proxyHost := proxyConfig.Host
-		proxyPort := proxyConfig.Port
-		proxyUsername := proxyConfig.Username
-		proxyPassword := proxyConfig.Password
-
-		if proxyConfig.Host == "" {
-			proxyHost = w.config.ProxyHost
-		}
-
-		if proxyConfig.Port == "" {
-			proxyPort = w.config.ProxyPort
-		}
-
-		if proxyConfig.Protocol == "" {
-			proxyProtocol = w.config.ProxyProtocol
-		}
-
-		if proxyConfig.Username == "" {
-			proxyUsername = w.config.ProxyUsername
-		}
-
-		if proxyConfig.Password == "" {
-			proxyPassword = w.config.ProxyPassword
-		}
-
-		proxyAddress, err := utils.BuildProxyAddress(proxyProtocol, proxyHost, proxyPort, proxyUsername, proxyPassword)
-		if err != nil {
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy error, continuing without proxy: %v", cd.Instance.Id, err)
-		} else {
-			err = client.SetProxyAddress(proxyAddress)
-			if err != nil {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy error, continuing without proxy: %v", cd.Instance.Id, err)
-			} else {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Proxy enabled (%s)", cd.Instance.Id, utils.NormalizeProxyProtocol(proxyProtocol, proxyPort))
-			}
-		}
-	}
-
-	client.EnableAutoReconnect = false
-	client.AutoTrustIdentity = true
-
-	mycli := &MyClient{
-		service:            &w,
-		Instance:           cd.Instance,
-		WAClient:           client,
-		eventHandlerID:     1,
-		userID:             cd.Instance.Id,
-		token:              cd.Instance.Token,
-		subscriptions:      cd.Subscriptions,
-		webhookUrl:         cd.Instance.Webhook,
-		rabbitmqEnable:     cd.Instance.RabbitmqEnable,
-		natsEnable:         cd.Instance.NatsEnable,
-		websocketEnable:    cd.Instance.WebSocketEnable,
-		instanceRepository: w.instanceRepository,
-		messageRepository:  w.messageRepository,
-		labelRepository:    w.labelRepository,
-		pollService:        w.pollService, // NOVO: Serviço de enquetes
-		userInfoCache:      w.userInfoCache,
-		clientPointer:      w.clientPointer,
-		myClientPointer:    w.myClientPointer,
-		killChannel:        w.killChannel,
-		config:             w.config,
-		historySyncID:      0,
-		rabbitmqProducer:   w.rabbitmqProducer,
-		webhookProducer:    w.webhookProducer,
-		websocketProducer:  w.websocketProducer,
-		mediaStorage:       w.mediaStorage,
-		processedMessages:  w.processedMessages,
-		natsProducer:       w.natsProducer,
-		loggerWrapper:      w.loggerWrapper,
-		qrcodeCount:        0,
-		passkeyCeremony:    w.passkeyCeremony,
-	}
-
-	mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
-
-	// Armazena o MyClient no map para permitir atualizações posteriores
-	w.myClientPointer[cd.Instance.Id] = mycli
-
-	if client.Store.ID != nil {
-		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Already logged in with JID: %s", cd.Instance.Id, client.Store.ID.String())
-		err = client.Connect()
-		if err != nil {
-			if strings.Contains(err.Error(), "EOF") {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Erro de conexão WebSocket (EOF). Tentando reconectar em 5 segundos...", cd.Instance.Id)
-				time.Sleep(5 * time.Second)
-				err = client.Connect()
-				if err != nil {
-					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Falha na segunda tentativa de conexão: %v", cd.Instance.Id, err)
-					return
-				}
-			} else if strings.Contains(err.Error(), "username/password authentication failed") {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy authentication failed, attempting to connect without proxy", cd.Instance.Id)
-
-				// Desabilita o proxy
-				client.SetProxy(nil)
-
-				// Tenta conectar sem proxy
-				err = client.Connect()
-				if err != nil {
-					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect even without proxy: %v", cd.Instance.Id, err)
-					return
-				}
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Successfully connected without proxy", cd.Instance.Id)
-			} else {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect: %v", cd.Instance.Id, err)
-				return
-			}
-		}
-	} else {
-		// New-device pairing. We intentionally do NOT use client.GetQRChannel:
-		// in the installed whatsmeow its qrChannel handler auto-confirms a
-		// passkey ceremony (SkipHandoffUX) and Disconnects the socket when the
-		// QR codes run out, both of which break passkey pairing (DOC2 §4.3/§4.4).
-		// Instead we Connect() directly and consume *events.QR in myEventHandler
-		// (see handleQRCodes), which pair.go dispatches to every handler anyway.
-		err = client.Connect()
-		if err != nil {
-			if strings.Contains(err.Error(), "EOF") {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Erro de conexão WebSocket (EOF). Tentando reconectar em 5 segundos...", cd.Instance.Id)
-				time.Sleep(5 * time.Second)
-				err = client.Connect()
-				if err != nil {
-					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Falha na segunda tentativa de conexão: %v", cd.Instance.Id, err)
-					return
-				}
-			} else if strings.Contains(err.Error(), "username/password authentication failed") {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy authentication failed during QR connection, attempting without proxy", cd.Instance.Id)
-
-				// Desabilita o proxy
-				client.SetProxy(nil)
-
-				// Tenta conectar sem proxy
-				err = client.Connect()
-				if err != nil {
-					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect even without proxy: %v", cd.Instance.Id, err)
-					return
-				}
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Successfully connected without proxy", cd.Instance.Id)
-			} else {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect: %v", cd.Instance.Id, err)
-				return
-			}
-		}
-
-	}
-
-	// Removed auto-reconnect logic to prevent infinite loops
-
+	// O restart por killChannel é um laço, não recursão: antes cada ciclo
+	// reentrava em StartClient e empilhava um frame (e um pool) por restart.
+restart:
 	for {
-		select {
-		case <-w.killChannel[cd.Instance.Id]:
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Received kill signal for user '%s'", cd.Instance.Id)
-			client.Disconnect()
+		var deviceStore *store.Device
+		var err error
 
-			delete(w.clientPointer, cd.Instance.Id)
-			delete(w.myClientPointer, cd.Instance.Id)
+		if cd.Instance.Jid != "" {
+			jid, _ := utils.ParseJID(cd.Instance.Jid)
+			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Jid found. Getting device store for jid: %s", cd.Instance.Id, jid)
+			deviceStore, err = container.GetDevice(context.Background(), jid)
+			if err != nil {
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Erro ao obter device store: %v", cd.Instance.Id, err)
+				return
+			}
+		} else {
+			w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] No jid found. Creating new device", cd.Instance.Id)
+			deviceStore = container.NewDevice()
+		}
 
-			// Limpar cache de userInfo para esta instância
-			w.userInfoCache.Delete(cd.Instance.Token)
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] UserInfo cache cleared for token: %s", cd.Instance.Id, cd.Instance.Token)
+		if deviceStore == nil {
+			w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] No store found. Creating new one", cd.Instance.Id)
+			deviceStore = container.NewDevice()
 
 			cd.Instance.Connected = false
-
 			err := w.instanceRepository.UpdateConnected(cd.Instance.Id, cd.Instance.Connected, cd.Instance.DisconnectReason)
 			if err != nil {
 				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Error updating instance: %s", cd.Instance.Id, err)
 			}
+		}
 
-			postMap := make(map[string]interface{})
+		var version clientVersion
 
-			postMap["event"] = "LoggedOut"
+		// PlatformType e nome exibido vêm do deployment (CONNECTION_NAME/PLATFORM_TYPE),
+		// não da instância: o rótulo em "Aparelhos conectados" é único por engine.
+		if platformType, err := utils.ParsePlatformType(w.config.PlatformType); err == nil {
+			store.DeviceProps.PlatformType = platformType.Enum()
+		} else {
+			w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] invalid PLATFORM_TYPE, keeping default: %v", cd.Instance.Id, err)
+		}
 
-			dataMap := make(map[string]interface{})
-
-			dataMap["reason"] = "Logged out"
-
-			postMap["data"] = dataMap
-
-			postMap["instanceToken"] = mycli.token
-			postMap["instanceId"] = mycli.userID
-			postMap["instanceName"] = cd.Instance.Name
-
-			var queueName string
-
-			if _, ok := postMap["event"]; ok {
-				queueName = strings.ToLower(fmt.Sprintf("%s.%s", cd.Instance.Id, postMap["event"]))
+		displayName := w.config.ConnectionName
+		if displayName == "" {
+			if cd.Instance.OsName == "" {
+				cd.Instance.OsName = utils.WhatsAppGetUserOS()
 			}
+			displayName = cd.Instance.OsName
+		}
+		store.DeviceProps.Os = &displayName
+		store.DeviceProps.RequireFullSync = proto.Bool(true)
 
-			values, err := json.Marshal(postMap)
+		if w.config.WhatsappVersionMajor != 0 && w.config.WhatsappVersionMinor != 0 && w.config.WhatsappVersionPatch != 0 {
+			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Setting whatsapp version to %d.%d.%d", cd.Instance.Id, w.config.WhatsappVersionMajor, w.config.WhatsappVersionMinor, w.config.WhatsappVersionPatch)
+			version.Major = w.config.WhatsappVersionMajor
+			if err == nil {
+				store.DeviceProps.Version.Primary = proto.Uint32(uint32(version.Major))
+			}
+			version.Minor = w.config.WhatsappVersionMinor
+			if err == nil {
+				store.DeviceProps.Version.Secondary = proto.Uint32(uint32(version.Minor))
+			}
+			version.Patch = w.config.WhatsappVersionPatch
+			if err == nil {
+				store.DeviceProps.Version.Tertiary = proto.Uint32(uint32(version.Patch))
+			}
+		} else {
+			// Try to fetch version from WhatsApp Web
+			webVersion, err := fetchWhatsAppWebVersion()
 			if err != nil {
-				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to marshal JSON for queue", cd.Instance.Id)
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to fetch WhatsApp Web version: %v", cd.Instance.Id, err)
+			} else {
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Setting whatsapp version from web to %d.%d.%d", cd.Instance.Id, webVersion.Major, webVersion.Minor, webVersion.Patch)
+				version = *webVersion
+				store.DeviceProps.Version.Primary = proto.Uint32(uint32(version.Major))
+				store.DeviceProps.Version.Secondary = proto.Uint32(uint32(version.Minor))
+				store.DeviceProps.Version.Tertiary = proto.Uint32(uint32(version.Patch))
+			}
+		}
+
+		// 🔒 FIX: Sempre criar logger, mesmo que WaDebug esteja vazio
+		// Usar "INFO" como nível mínimo para garantir que logs importantes apareçam
+		minLevel := w.config.WaDebug
+		if minLevel == "" {
+			minLevel = "INFO" // Nível mínimo para garantir que logs INFO apareçam
+		}
+		clientLog := waLog.Stdout("Client", minLevel, true)
+		client := whatsmeow.NewClient(deviceStore, clientLog)
+
+		w.clientPointer[cd.Instance.Id] = client
+
+		if cd.IsProxy {
+			var proxyConfig ProxyConfig
+			err := json.Unmarshal([]byte(cd.Instance.Proxy), &proxyConfig)
+			if err != nil {
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] error unmarshalling proxy config", cd.Instance.Id)
 				return
 			}
 
-			go w.CallWebhook(cd.Instance, queueName, values)
+			proxyProtocol := proxyConfig.Protocol
+			proxyHost := proxyConfig.Host
+			proxyPort := proxyConfig.Port
+			proxyUsername := proxyConfig.Username
+			proxyPassword := proxyConfig.Password
 
-			if mycli.config.AmqpGlobalEnabled || mycli.config.NatsGlobalEnabled {
-				go mycli.service.SendToGlobalQueues(postMap["event"].(string), values, mycli.userID)
+			if proxyConfig.Host == "" {
+				proxyHost = w.config.ProxyHost
 			}
 
-			// restart client
-			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Restarting client", cd.Instance.Id)
-			w.StartClient(cd)
-			return
-		default:
-			time.Sleep(1000 * time.Millisecond)
+			if proxyConfig.Port == "" {
+				proxyPort = w.config.ProxyPort
+			}
+
+			if proxyConfig.Protocol == "" {
+				proxyProtocol = w.config.ProxyProtocol
+			}
+
+			if proxyConfig.Username == "" {
+				proxyUsername = w.config.ProxyUsername
+			}
+
+			if proxyConfig.Password == "" {
+				proxyPassword = w.config.ProxyPassword
+			}
+
+			proxyAddress, err := utils.BuildProxyAddress(proxyProtocol, proxyHost, proxyPort, proxyUsername, proxyPassword)
+			if err != nil {
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy error, continuing without proxy: %v", cd.Instance.Id, err)
+			} else {
+				err = client.SetProxyAddress(proxyAddress)
+				if err != nil {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy error, continuing without proxy: %v", cd.Instance.Id, err)
+				} else {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Proxy enabled (%s)", cd.Instance.Id, utils.NormalizeProxyProtocol(proxyProtocol, proxyPort))
+				}
+			}
+		}
+
+		client.EnableAutoReconnect = false
+		client.AutoTrustIdentity = true
+
+		mycli := &MyClient{
+			service:            &w,
+			Instance:           cd.Instance,
+			WAClient:           client,
+			eventHandlerID:     1,
+			userID:             cd.Instance.Id,
+			token:              cd.Instance.Token,
+			subscriptions:      cd.Subscriptions,
+			webhookUrl:         cd.Instance.Webhook,
+			rabbitmqEnable:     cd.Instance.RabbitmqEnable,
+			natsEnable:         cd.Instance.NatsEnable,
+			websocketEnable:    cd.Instance.WebSocketEnable,
+			instanceRepository: w.instanceRepository,
+			messageRepository:  w.messageRepository,
+			labelRepository:    w.labelRepository,
+			pollService:        w.pollService, // NOVO: Serviço de enquetes
+			userInfoCache:      w.userInfoCache,
+			clientPointer:      w.clientPointer,
+			myClientPointer:    w.myClientPointer,
+			killChannel:        w.killChannel,
+			config:             w.config,
+			historySyncID:      0,
+			rabbitmqProducer:   w.rabbitmqProducer,
+			webhookProducer:    w.webhookProducer,
+			websocketProducer:  w.websocketProducer,
+			mediaStorage:       w.mediaStorage,
+			processedMessages:  w.processedMessages,
+			natsProducer:       w.natsProducer,
+			loggerWrapper:      w.loggerWrapper,
+			qrcodeCount:        0,
+			passkeyCeremony:    w.passkeyCeremony,
+		}
+
+		mycli.eventHandlerID = mycli.WAClient.AddEventHandler(mycli.myEventHandler)
+
+		// Armazena o MyClient no map para permitir atualizações posteriores
+		w.myClientPointer[cd.Instance.Id] = mycli
+
+		if client.Store.ID != nil {
+			w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Already logged in with JID: %s", cd.Instance.Id, client.Store.ID.String())
+			err = client.Connect()
+			if err != nil {
+				if strings.Contains(err.Error(), "EOF") {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Erro de conexão WebSocket (EOF). Tentando reconectar em 5 segundos...", cd.Instance.Id)
+					time.Sleep(5 * time.Second)
+					err = client.Connect()
+					if err != nil {
+						w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Falha na segunda tentativa de conexão: %v", cd.Instance.Id, err)
+						return
+					}
+				} else if strings.Contains(err.Error(), "username/password authentication failed") {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy authentication failed, attempting to connect without proxy", cd.Instance.Id)
+
+					// Desabilita o proxy
+					client.SetProxy(nil)
+
+					// Tenta conectar sem proxy
+					err = client.Connect()
+					if err != nil {
+						w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect even without proxy: %v", cd.Instance.Id, err)
+						return
+					}
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Successfully connected without proxy", cd.Instance.Id)
+				} else {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect: %v", cd.Instance.Id, err)
+					return
+				}
+			}
+		} else {
+			// New-device pairing. We intentionally do NOT use client.GetQRChannel:
+			// in the installed whatsmeow its qrChannel handler auto-confirms a
+			// passkey ceremony (SkipHandoffUX) and Disconnects the socket when the
+			// QR codes run out, both of which break passkey pairing (DOC2 §4.3/§4.4).
+			// Instead we Connect() directly and consume *events.QR in myEventHandler
+			// (see handleQRCodes), which pair.go dispatches to every handler anyway.
+			err = client.Connect()
+			if err != nil {
+				if strings.Contains(err.Error(), "EOF") {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Erro de conexão WebSocket (EOF). Tentando reconectar em 5 segundos...", cd.Instance.Id)
+					time.Sleep(5 * time.Second)
+					err = client.Connect()
+					if err != nil {
+						w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Falha na segunda tentativa de conexão: %v", cd.Instance.Id, err)
+						return
+					}
+				} else if strings.Contains(err.Error(), "username/password authentication failed") {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Proxy authentication failed during QR connection, attempting without proxy", cd.Instance.Id)
+
+					// Desabilita o proxy
+					client.SetProxy(nil)
+
+					// Tenta conectar sem proxy
+					err = client.Connect()
+					if err != nil {
+						w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect even without proxy: %v", cd.Instance.Id, err)
+						return
+					}
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Successfully connected without proxy", cd.Instance.Id)
+				} else {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to connect: %v", cd.Instance.Id, err)
+					return
+				}
+			}
+
+		}
+
+		// Removed auto-reconnect logic to prevent infinite loops
+
+		for {
+			select {
+			case <-w.killChannel[cd.Instance.Id]:
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Received kill signal for user '%s'", cd.Instance.Id)
+				client.Disconnect()
+
+				delete(w.clientPointer, cd.Instance.Id)
+				delete(w.myClientPointer, cd.Instance.Id)
+
+				// Limpar cache de userInfo para esta instância
+				w.userInfoCache.Delete(cd.Instance.Token)
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] UserInfo cache cleared for token: %s", cd.Instance.Id, cd.Instance.Token)
+
+				cd.Instance.Connected = false
+
+				err := w.instanceRepository.UpdateConnected(cd.Instance.Id, cd.Instance.Connected, cd.Instance.DisconnectReason)
+				if err != nil {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Error updating instance: %s", cd.Instance.Id, err)
+				}
+
+				postMap := make(map[string]interface{})
+
+				postMap["event"] = "LoggedOut"
+
+				dataMap := make(map[string]interface{})
+
+				dataMap["reason"] = "Logged out"
+
+				postMap["data"] = dataMap
+
+				postMap["instanceToken"] = mycli.token
+				postMap["instanceId"] = mycli.userID
+				postMap["instanceName"] = cd.Instance.Name
+
+				var queueName string
+
+				if _, ok := postMap["event"]; ok {
+					queueName = strings.ToLower(fmt.Sprintf("%s.%s", cd.Instance.Id, postMap["event"]))
+				}
+
+				values, err := json.Marshal(postMap)
+				if err != nil {
+					w.loggerWrapper.GetLogger(cd.Instance.Id).LogError("[%s] Failed to marshal JSON for queue", cd.Instance.Id)
+					return
+				}
+
+				go w.CallWebhook(cd.Instance, queueName, values)
+
+				if mycli.config.AmqpGlobalEnabled || mycli.config.NatsGlobalEnabled {
+					go mycli.service.SendToGlobalQueues(postMap["event"].(string), values, mycli.userID)
+				}
+
+				// restart client
+				w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Restarting client", cd.Instance.Id)
+				// O container é do processo e continua aberto: o restart só refaz o
+				// setup (device store, client, connect) no laço externo.
+				continue restart
+			default:
+				time.Sleep(1000 * time.Millisecond)
+			}
 		}
 	}
 }
@@ -2837,12 +2831,21 @@ func NewWhatsmeowService(
 		natsProducer:       natsProducer,
 		loggerWrapper:      loggerWrapper,
 		passkeyCeremony:    ceremony.NewStore(),
+		authContainer:      newAuthContainer(),
 	}
 }
 
 // GetPollService retorna o serviço de polls (evita dupla inicialização)
 func (w *whatsmeowService) GetPollService() poll_service.PollService {
 	return w.pollService
+}
+
+// Close libera o container de device compartilhado (pool do Postgres da engine).
+func (w whatsmeowService) Close() error {
+	if w.authContainer == nil {
+		return nil
+	}
+	return w.authContainer.close()
 }
 
 // PasskeyCeremonyStore exposes the shared ceremony store so the public HTTP

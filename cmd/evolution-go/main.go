@@ -82,7 +82,9 @@ func init() {
 	}
 }
 
-func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string, runtimeCtx *core.RuntimeContext) *gin.Engine {
+// setupRouter monta as rotas e devolve também o WhatsmeowService para que o
+// shutdown possa fechar o container de device (pool do Postgres da engine).
+func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.Config, conn *amqp.Connection, exPath string, runtimeCtx *core.RuntimeContext) (*gin.Engine, whatsmeow_service.WhatsmeowService) {
 	killChannel := make(map[string](chan bool))
 	clientPointer := make(map[string]*whatsmeow.Client)
 
@@ -258,7 +260,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		websocket_producer.ServeWs(c.Writer, c.Request, instanceId, websocketProducer)
 	})
 
-	return r
+	return r, whatsmeowService
 }
 
 func migrate(db *gorm.DB) {
@@ -405,7 +407,7 @@ func main() {
 		logger.LogInfo("RabbitMQ URL not configured, skipping RabbitMQ connection")
 	}
 
-	r := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath, runtimeCtx)
+	r, waService := setupRouter(db, authDB, sqliteDB, cfg, conn, exPath, runtimeCtx)
 
 	// Graceful shutdown with heartbeat
 	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
@@ -435,6 +437,14 @@ func main() {
 	heartbeatCancel()
 
 	core.Shutdown(runtimeCtx)
+
+	// Libera o pool do container de device do whatsmeow. Falha aqui não impede o
+	// processo de encerrar.
+	if waService != nil {
+		if err := waService.Close(); err != nil {
+			logger.LogError("[SHUTDOWN] Failed to close whatsmeow device container: %v", err)
+		}
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

@@ -18,13 +18,20 @@ import (
 )
 
 type Config struct {
-	PostgresAuthDB       string
-	postgresUsersDB      string
-	PostgresHost         string
-	PostgresPort         string
-	PostgresUser         string
-	PostgresPassword     string
-	PostgresDB           string
+	PostgresAuthDB   string
+	postgresUsersDB  string
+	PostgresHost     string
+	PostgresPort     string
+	PostgresUser     string
+	PostgresPassword string
+	PostgresDB       string
+
+	// Pool do container de device do whatsmeow (Postgres AUTH)
+	PostgresAuthMaxOpenConns    int
+	PostgresAuthMaxIdleConns    int
+	PostgresAuthConnMaxIdleTime string
+	PostgresAuthConnMaxLifetime string
+
 	DatabaseSaveMessages bool
 	GlobalApiKey         string
 	WaDebug              string
@@ -211,8 +218,53 @@ func (c *Config) CreateAuthDB() (*sql.DB, error) {
 	return db, nil
 }
 
+// Defaults do pool do container de device do whatsmeow. Aplicados quando a env
+// ausente ou inválida: tuning de pool nunca impede a engine de subir.
+const (
+	defaultAuthMaxOpenConns    = 10
+	defaultAuthMaxIdleConns    = 5
+	defaultAuthConnMaxIdleTime = "1m"
+	defaultAuthConnMaxLifetime = "30m"
+)
+
+// loadEnvInt lê uma env inteira. Ausente/vazia, não-numérica ou <= 0 aplica o
+// default com warn — nunca LogFatal/panic.
+func loadEnvInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		logger.LogWarn("[CONFIG] invalid %s=%q: expected a positive integer, using default %d", key, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
+// loadEnvDuration valida a env com time.ParseDuration e devolve o valor normalizado
+// (a string original, aceita por time.ParseDuration depois). Inválida ou <= 0
+// aplica o default com warn.
+func loadEnvDuration(key, fallback string) string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		logger.LogWarn("[CONFIG] invalid %s=%q: expected a duration like '1m', using default %s", key, raw, fallback)
+		return fallback
+	}
+	return raw
+}
+
 func Load() *Config {
 	postgresAuthDB := os.Getenv(config_env.POSTGRES_AUTH_DB)
+
+	postgresAuthMaxOpenConns := loadEnvInt(config_env.POSTGRES_AUTH_MAX_OPEN_CONNS, defaultAuthMaxOpenConns)
+	postgresAuthMaxIdleConns := loadEnvInt(config_env.POSTGRES_AUTH_MAX_IDLE_CONNS, defaultAuthMaxIdleConns)
+	postgresAuthConnMaxIdleTime := loadEnvDuration(config_env.POSTGRES_AUTH_CONN_MAX_IDLE_TIME, defaultAuthConnMaxIdleTime)
+	postgresAuthConnMaxLifetime := loadEnvDuration(config_env.POSTGRES_AUTH_CONN_MAX_LIFETIME, defaultAuthConnMaxLifetime)
 
 	postgresUsersDB := os.Getenv(config_env.POSTGRES_USERS_DB)
 
@@ -378,28 +430,33 @@ func Load() *Config {
 		PostgresUser:         postgresUser,
 		PostgresPassword:     postgresPassword,
 		PostgresDB:           postgresDB,
-		WhatsappVersionMajor: major,
-		WhatsappVersionMinor: minor,
-		WhatsappVersionPatch: patch,
-		ProxyProtocol:        proxyProtocol,
-		ProxyHost:            proxyHost,
-		ProxyPort:            proxyPort,
-		ProxyUsername:        proxyUsername,
-		ProxyPassword:        proxyPassword,
-		EventIgnoreGroup:     eventIgnoreGroup == "true",
-		EventIgnoreStatus:    eventIgnoreStatus == "true",
-		QrcodeMaxCount:       qrMaxCount,
-		CheckUserExists:      checkUserExists != "false", // Default true, set to false to disable
-		AmqpGlobalEvents:     amqpGlobalEvents,
-		AmqpSpecificEvents:   amqpSpecificEvents,
-		NatsUrl:              natsUrl,
-		NatsGlobalEnabled:    natsGlobalEnabled == "true",
-		NatsGlobalEvents:     natsGlobalEvents,
-		LogMaxSize:           logMaxSize,
-		LogMaxBackups:        logMaxBackups,
-		LogMaxAge:            logMaxAge,
-		LogDirectory:         logDirectory,
-		LogCompress:          logCompress,
+
+		PostgresAuthMaxOpenConns:    postgresAuthMaxOpenConns,
+		PostgresAuthMaxIdleConns:    postgresAuthMaxIdleConns,
+		PostgresAuthConnMaxIdleTime: postgresAuthConnMaxIdleTime,
+		PostgresAuthConnMaxLifetime: postgresAuthConnMaxLifetime,
+		WhatsappVersionMajor:        major,
+		WhatsappVersionMinor:        minor,
+		WhatsappVersionPatch:        patch,
+		ProxyProtocol:               proxyProtocol,
+		ProxyHost:                   proxyHost,
+		ProxyPort:                   proxyPort,
+		ProxyUsername:               proxyUsername,
+		ProxyPassword:               proxyPassword,
+		EventIgnoreGroup:            eventIgnoreGroup == "true",
+		EventIgnoreStatus:           eventIgnoreStatus == "true",
+		QrcodeMaxCount:              qrMaxCount,
+		CheckUserExists:             checkUserExists != "false", // Default true, set to false to disable
+		AmqpGlobalEvents:            amqpGlobalEvents,
+		AmqpSpecificEvents:          amqpSpecificEvents,
+		NatsUrl:                     natsUrl,
+		NatsGlobalEnabled:           natsGlobalEnabled == "true",
+		NatsGlobalEvents:            natsGlobalEvents,
+		LogMaxSize:                  logMaxSize,
+		LogMaxBackups:               logMaxBackups,
+		LogMaxAge:                   logMaxAge,
+		LogDirectory:                logDirectory,
+		LogCompress:                 logCompress,
 	}
 
 	minioEnabled := os.Getenv(config_env.MINIO_ENABLED) == "true"
