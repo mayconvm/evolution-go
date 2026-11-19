@@ -28,6 +28,36 @@
   retomar depois (registrado no produto em
   `crm-whats/docs/plans/inprogress/2026-11-04-historico-whatsapp/progress.md`).
 
+## v0.7.7-beta
+
+**Docker:** `evolution-go:0.7.7-beta`
+
+### 🆕 New Features
+- **`WEBHOOK_SKIP_VIDEO` (default `false`)** — nova env que suprime o download de
+  vídeo e a emissão do campo `base64` de vídeo no payload do webhook. A engine
+  baixava a mídia inteira para memória (`[]byte`) e depois codificava em base64
+  (~1,33x o arquivo, com as duas cópias vivas no heap — na prática ~3x): um vídeo
+  de 97 MB virava ~130 MB de string e derrubou a engine por **OOMKill** com
+  `limits.memory: 768Mi` em 18/11/2026. Com a flag ligada, `evt.Message.GetVideoMessage()`
+  (e o vídeo de `associatedChildMessage`) **não são baixados** — os metadados
+  (id, chat, tipo, `caption`, `fileLength`, `URL`) continuam indo ao webhook
+  normalmente. Sem a env nada muda (baixa e emite, como antes).
+  Além do skip na origem, há **defesa em profundidade**: antes do marshal do
+  payload o campo `base64` é removido de qualquer mensagem de vídeo, mesmo que
+  outro caminho venha a preenchê-lo.
+  (`pkg/config/env/env.go`, `pkg/config/config.go`,
+  `pkg/whatsmeow/service/webhook_video_skip.go`,
+  `pkg/whatsmeow/service/whatsmeow.go`, `pkg/sendMessage/service/send_service.go`)
+
+### 🧪 Testes
+- `pkg/whatsmeow/service/webhook_video_skip_test.go`: matriz da política
+  (`ShouldDownloadWebhookMedia`), ordem da cadeia de download
+  (`payloadMediaKind` — imagem principal + vídeo associado escolhe a imagem) e o
+  invariante de `base64` (`StripVideoBase64`) — flag ausente preserva o campo,
+  flag ligada remove só em vídeo e mantém os metadados.
+- `pkg/config/config_webhook_test.go`: `WEBHOOK_SKIP_VIDEO` ausente/vazia/`false`
+  → `false`; `true`/`TRUE` → `true`; valor inválido cai no default.
+
 ## v0.7.6-beta
 
 **Docker:** `evolution-go:0.7.6-beta`

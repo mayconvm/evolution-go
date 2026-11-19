@@ -116,6 +116,8 @@ LOGTYPE=console
 | `GLOBAL_API_KEY` | API authentication key | **Required** |
 | `DATABASE_SAVE_MESSAGES` | Enable message storage | `false` |
 | `WADEBUG` | WhatsApp debug level | `INFO` |
+| `WEBHOOK_FILES` | Download media into the webhook payload (base64) | `true` |
+| `WEBHOOK_SKIP_VIDEO` | Don't download video and don't emit its `base64` in the webhook | `false` |
 
 ---
 

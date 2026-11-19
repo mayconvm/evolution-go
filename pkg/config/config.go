@@ -37,6 +37,12 @@ type Config struct {
 	WaDebug              string
 	LogType              string
 	WebhookFiles         bool
+	// WebhookSkipVideo desliga o download de vídeo e a emissão do campo
+	// `base64` de vídeo no payload do webhook (default false = comportamento
+	// antigo). Existe porque a engine baixa a mídia inteira para memória e
+	// depois codifica em base64 (~3x o tamanho do arquivo): um vídeo de 97 MB
+	// virava ~130 MB de string e derrubava a engine por OOMKill.
+	WebhookSkipVideo     bool
 	ConnectOnStartup     bool
 	OsName               string
 	ConnectionName       string
@@ -242,6 +248,32 @@ func loadEnvInt(key string, fallback int) int {
 	return value
 }
 
+// loadEnvBool lê uma env booleana com default explícito. Só "true" (case
+// insensitive, com espaços aparados) liga; qualquer outro valor — inclusive
+// ausente — devolve o default. Existe para flags de comportamento em que a
+// ausência da env NÃO pode mudar o default histórico.
+func loadEnvBool(key string, fallback bool) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if raw == "" {
+		return fallback
+	}
+	switch raw {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no":
+		return false
+	default:
+		logger.LogWarn("[CONFIG] invalid %s=%q: expected a boolean, using default %t", key, raw, fallback)
+		return fallback
+	}
+}
+
+// loadEnvBoolDefaultFalse é o atalho para flags opt-in (ex.: WEBHOOK_SKIP_VIDEO),
+// em que a ausência da env precisa preservar o comportamento antigo.
+func loadEnvBoolDefaultFalse(key string) bool {
+	return loadEnvBool(key, false)
+}
+
 // loadEnvDuration valida a env com time.ParseDuration e devolve o valor normalizado
 // (a string original, aceita por time.ParseDuration depois). Inválida ou <= 0
 // aplica o default com warn.
@@ -294,6 +326,10 @@ func Load() *Config {
 	if webhookFiles == "" {
 		webhookFiles = "true"
 	}
+
+	// Sem env = false: preserva o comportamento histórico (baixar e emitir
+	// base64 de vídeo). Só a string exata "true" liga o skip.
+	webhookSkipVideo := loadEnvBoolDefaultFalse(config_env.WEBHOOK_SKIP_VIDEO)
 
 	connectOnStartup := os.Getenv(config_env.CONNECT_ON_STARTUP)
 	if connectOnStartup == "" {
@@ -415,6 +451,7 @@ func Load() *Config {
 		WaDebug:              waDebug,
 		LogType:              logType,
 		WebhookFiles:         webhookFiles == "true",
+		WebhookSkipVideo:     webhookSkipVideo,
 		ConnectOnStartup:     connectOnStartup == "true",
 		OsName:               osName,
 		ConnectionName:       connectionName,

@@ -1409,6 +1409,17 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 				var mimeType string
 				var mediaSize int64
 
+				// Política de mídia do webhook (`WEBHOOK_SKIP_VIDEO`): quando a
+				// flag está ligada o download de vídeo é suprimido — é o único
+				// ponto do fluxo inbound em que o arquivo inteiro entra no heap
+				// antes de virar base64. Suprime SÓ o download: os metadados da
+				// mensagem (id, chat, tipo, caption, fileLength, URL) continuam
+				// indo ao webhook normalmente.
+				skipVideoDownload := !ShouldDownloadWebhookMedia(WebhookMediaVideo, mycli.config.WebhookSkipVideo)
+				// Marca que a ausência de bytes é intencional, para o log final
+				// não acusar "download failure" num skip deliberado.
+				mediaDownloadSkipped := false
+
 				// Create context with timeout for large files
 				downloadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 				defer cancel()
@@ -1441,12 +1452,17 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 						mediaSize = int64(*document.FileLength)
 					}
 				} else if video != nil {
-					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Downloading video - ID: %s, Size: %d bytes", mycli.userID, evt.Info.ID, video.GetFileLength())
-					data, err = mycli.WAClient.Download(downloadCtx, video)
-					extension = ".mp4"
-					mimeType = "video/mp4"
-					if video.FileLength != nil {
-						mediaSize = int64(*video.FileLength)
+					if skipVideoDownload {
+						mediaDownloadSkipped = true
+						mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Skipping video download (WEBHOOK_SKIP_VIDEO=true) - ID: %s, Size: %d bytes", mycli.userID, evt.Info.ID, video.GetFileLength())
+					} else {
+						mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Downloading video - ID: %s, Size: %d bytes", mycli.userID, evt.Info.ID, video.GetFileLength())
+						data, err = mycli.WAClient.Download(downloadCtx, video)
+						extension = ".mp4"
+						mimeType = "video/mp4"
+						if video.FileLength != nil {
+							mediaSize = int64(*video.FileLength)
+						}
 					}
 				} else if sticker != nil {
 					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Downloading sticker - ID: %s", mycli.userID, evt.Info.ID)
@@ -1492,10 +1508,15 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 					mimeType = associatedDocument.GetMimetype()
 					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Processing associated child document message", mycli.userID)
 				} else if associatedVideo != nil {
-					data, err = mycli.WAClient.Download(context.Background(), associatedVideo)
-					extension = ".mp4"
-					mimeType = "video/mp4"
-					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Processing associated child video message", mycli.userID)
+					if skipVideoDownload {
+						mediaDownloadSkipped = true
+						mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Skipping associated child video download (WEBHOOK_SKIP_VIDEO=true)", mycli.userID)
+					} else {
+						data, err = mycli.WAClient.Download(context.Background(), associatedVideo)
+						extension = ".mp4"
+						mimeType = "video/mp4"
+						mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Processing associated child video message", mycli.userID)
+					}
 				} else if associatedSticker != nil {
 					data, err = mycli.WAClient.Download(context.Background(), associatedSticker)
 					extension = ".png"
@@ -1534,7 +1555,7 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 
 					// Don't return here - continue processing the message without media
 					mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Continuing message processing without media download - ID: %s", mycli.userID, evt.Info.ID)
-				} else {
+				} else if !mediaDownloadSkipped {
 					actualSize := len(data)
 					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Media download successful - ID: %s, Expected: %d bytes, Actual: %d bytes, Duration: %v", mycli.userID, evt.Info.ID, mediaSize, actualSize, downloadDuration)
 
@@ -1585,6 +1606,10 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 						mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Base64 encoding completed - ID: %s, Original: %d bytes, Encoded: %d chars, Duration: %v", mycli.userID, evt.Info.ID, len(data), len(encodeData), encodeDuration)
 						messageMap["base64"] = encodeData
 					}
+				} else if mediaDownloadSkipped {
+					// Skip deliberado (`WEBHOOK_SKIP_VIDEO`): não é falha, então
+					// não há base64 nem upload — só os metadados no payload.
+					mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Media download skipped by policy (WEBHOOK_SKIP_VIDEO=true) - ID: %s", mycli.userID, evt.Info.ID)
 				} else {
 					mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Skipping media storage due to download failure - ID: %s", mycli.userID, evt.Info.ID)
 				}
@@ -1602,6 +1627,15 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 		}
 
 		delete(dataMap, "RawMessage")
+
+		// Defesa em profundidade de `WEBHOOK_SKIP_VIDEO`: o download já foi
+		// suprimido acima, mas o usuário pediu explicitamente para ignorar o
+		// valor de `base64` em vídeo. Remover aqui — no último ponto antes do
+		// marshal do payload — garante o invariante mesmo se outro caminho
+		// (reply com vídeo, storage, mudança futura) voltar a preencher o campo.
+		if StripVideoBase64(dataMap, evt.Message, mycli.config.WebhookSkipVideo) {
+			mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Removed video base64 from webhook payload (WEBHOOK_SKIP_VIDEO=true) - ID: %s", mycli.userID, evt.Info.ID)
+		}
 
 		if message, ok := dataMap["Message"].(map[string]interface{}); ok {
 			if imageMessage, ok := message["imageMessage"].(map[string]interface{}); ok {

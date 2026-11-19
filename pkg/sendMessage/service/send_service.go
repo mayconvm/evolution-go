@@ -2834,7 +2834,17 @@ func (s *sendService) SendMessage(instance *instance_model.Instance, msg *waE2E.
 		video := msg.GetVideoMessage()
 		sticker := msg.GetStickerMessage()
 
-		if img != nil {
+		// Política de mídia do webhook (`WEBHOOK_SKIP_VIDEO`): vídeo é a única
+		// mídia que pode ser grande o bastante para estourar o heap (97 MB de
+		// arquivo → ~130 MB de base64). Com a flag ligada não baixamos e,
+		// portanto, não emitimos `base64`; os demais campos da mensagem seguem.
+		// A condição respeita a ordem da cadeia abaixo (img → audio → document →
+		// video → sticker): se outra mídia vem antes, ela é a que seria baixada.
+		videoIsChosen := img == nil && audio == nil && document == nil && video != nil
+		mediaSkippedByPolicy := videoIsChosen && !whatsmeow_service.ShouldDownloadWebhookMedia(whatsmeow_service.WebhookMediaVideo, s.config.WebhookSkipVideo)
+		if mediaSkippedByPolicy {
+			s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Skipping video download and base64 in webhook payload (WEBHOOK_SKIP_VIDEO=true)", instance.Id)
+		} else if img != nil {
 			data, err = s.clientPointer[instance.Id].Download(context.Background(), img)
 		} else if audio != nil {
 			data, err = s.clientPointer[instance.Id].Download(context.Background(), audio)
@@ -2856,7 +2866,10 @@ func (s *sendService) SendMessage(instance *instance_model.Instance, msg *waE2E.
 			}
 		}
 
-		if err == nil {
+		// `err == nil && len(data) > 0`: sem bytes (download falhou ou skip de
+		// política) não há base64 a emitir. Antes, o skip deixava `data` nil com
+		// `err` nil e o campo saía como string vazia.
+		if err == nil && len(data) > 0 {
 			// Acessando o Message do map já convertido
 			messageMap := msgMap
 			if messageMap == nil {
@@ -2867,6 +2880,12 @@ func (s *sendService) SendMessage(instance *instance_model.Instance, msg *waE2E.
 			messageMap["base64"] = encodeData
 
 			messageData["Message"] = messageMap
+		}
+
+		// Defesa em profundidade de `WEBHOOK_SKIP_VIDEO`: nenhum `base64` de
+		// vídeo chega ao payload, mesmo que algum caminho acima o preencha.
+		if whatsmeow_service.StripVideoBase64(messageData, msg, s.config.WebhookSkipVideo) {
+			s.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Removed video base64 from webhook payload (WEBHOOK_SKIP_VIDEO=true)", instance.Id)
 		}
 	}
 
